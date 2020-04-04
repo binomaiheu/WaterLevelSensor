@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <PubSubClient.h>
+#include <IPAddress.h>
 #include <WiFiNINA.h>
 
 #include "arduino_secrets.h"
@@ -7,25 +8,22 @@
 #define triggerPin 12
 #define echoPin    13
 
-char ssid[]  = SECRET_SSID;
-char pass[]  = SECRET_PASS;
-int keyIndex = 0;  // your network key Index number (needed only for WEP)
-int status   = WL_IDLE_STATUS;
+char data[80];
 
-// if you don't want to use DNS (and reduce your sketch size)
-// use the numeric IP instead of the name for the server:
-IPAddress server(168,192,1,2);  // numeric IP for Bob, no DNS
+int  status = 0;
 
-// Initialize the Ethernet client library
-// with the IP address and port of the server
-// that you want to connect to (port 80 is default for HTTP):
+// Some timers
+long tWifiConnect = -1; // timestamp of the last wifi connection attempt
+long tMqttConnect = -1; // timestamp of the last wifi connection attempt
+long tWifiStatus  = -1; // timestamp of the last wifi connection status print
 
-// MQTT client
-PubSubClient client;
+// Initialize the the wifi client
+WiFiClient   wifiClient;
 
-/*
-  Measure the distance using the temperature (should there be a sensor)
-*/
+// Setup mqtt connection
+void callback(char* topic, byte* payload, unsigned int length);
+PubSubClient mqttClient( SECRET_MQTT_SERVER, SECRET_MQTT_PORT, callback, wifiClient );
+
 float distanceCm( float tempCelsius ) {
 
     digitalWrite(triggerPin, LOW);
@@ -46,17 +44,155 @@ float distanceCm( float tempCelsius ) {
     }
 }
 
+// print the SSID of the network you're attached to:
+void printWifiStatus() 
+{  
+  Serial.print("SSID: ");
+  Serial.print(WiFi.SSID());  
 
+  IPAddress ip = WiFi.localIP();
+  Serial.print(", IP: ");
+  Serial.print(ip);
+
+  long rssi = WiFi.RSSI();
+  Serial.print(", RSSI:");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+
+  return;
+}
+
+
+void printMacAddress() 
+{
+  byte mac[6];
+
+  WiFi.macAddress(mac);
+  Serial.print("MAC: ");
+  Serial.print(mac[5],HEX);
+  Serial.print(":");
+  Serial.print(mac[4],HEX);
+  Serial.print(":");
+  Serial.print(mac[3],HEX);
+  Serial.print(":");
+  Serial.print(mac[2],HEX);
+  Serial.print(":");
+  Serial.print(mac[1],HEX);
+  Serial.print(":");
+  Serial.println(mac[0],HEX);
+  
+  return;
+}
+
+void startWifi( void ) 
+{
+  // attempt to connect to Wifi network:
+  if ( WiFi.status() != WL_CONNECTED ) {
+    delay(1);
+    Serial.print("Connecting to SSID: ");
+    Serial.println( SECRET_WIFI_SSID );
+    // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
+    WiFi.begin( SECRET_WIFI_SSID, SECRET_WIFI_PASS );
+
+  }  
+
+  return;
+}
+
+
+// do nothing when message recieved
+void callback(char* topic, byte* payload, unsigned int length) {
+  return;
+}
 
 void setup() {
+  
+  // Setup pins for reading the sensor  
   Serial.begin(9600);
+  while (!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
+
   pinMode(triggerPin, OUTPUT);
   pinMode(echoPin, INPUT);
+
+  // Setup WiFI    
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("Communication with WiFi module failed!");
+    // don't continue
+    while (true);
+  }
+  printMacAddress();
+
+
+  String fv = WiFi.firmwareVersion();
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println("Please upgrade the firmware");
+  }
+
 }
 
 void loop() {  
+
+  /* ========================================================================
+   *  WiFi management   
+   *  ==================================================================== */
+
+  // if the wifi is not connected and the last connection attempt is more than 
+  // 30 seconds ago... attempt to start the wifi agaion
+  if ( ( WiFi.status() != WL_CONNECTED ) && ( millis() - tWifiConnect ) > 30000 ) {
+    startWifi();
+    tWifiConnect = millis();
+    delay(10);
+    printWifiStatus();
+  }
+
+  // print wifi status every 60 sec
+  if ( ( WiFi.status() == WL_CONNECTED ) && ( millis() - tWifiStatus ) > 60000 ) {
+    printWifiStatus();
+    tWifiStatus = millis();
+  }
+
+
+
+  /* ========================================================================
+   *  Readout sensors
+   *  ==================================================================== */
   float d = distanceCm( 20. ); // assuming 20 °C
   Serial.print( F( "Distance: ") );
   Serial.println( d );
-  delay(1000);
+
+  status = 0.;
+  if ( d < 0. ) status = 1;
+
+
+
+  /* ========================================================================
+   *  MQTT Broker
+   *  ==================================================================== */
+  if ( ( WiFi.status() == WL_CONNECTED ) &&
+       ( ! mqttClient.connected() ) && 
+       ( millis() - tMqttConnect ) > 30000 ) {    
+    if ( mqttClient.connect( "mqtt", SECRET_MQTT_USER, SECRET_MQTT_PASS ) ) {
+      Serial.println("Connected to MQTT server.");
+    } else {
+      Serial.print("Failed to connect with MQTT server, state ");
+      Serial.println(mqttClient.state());
+    }
+    tMqttConnect = millis();
+  }
+
+  if ( mqttClient.connected() ) {
+    long rssi = WiFi.RSSI();
+    String payload = 
+      "{\"depth\": " + String(d,2) + 
+      ", \"rssi\": " + String(rssi) + 
+      ", \"status\": " + String(status) + "}";
+    payload.toCharArray(data, (payload.length() + 1));
+    mqttClient.publish( SECRET_MQTT_CHANNEL, data);
+  }
+
+
+  // and repeat...
+  delay(5000);
 }
