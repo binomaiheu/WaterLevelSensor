@@ -109,9 +109,6 @@ void setup() {
   
   // Setup pins for reading the sensor  
   Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for native USB port only
-  }
 
   pinMode(triggerPin, OUTPUT);
   pinMode(echoPin, INPUT);
